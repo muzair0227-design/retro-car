@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="ms">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Retro Racer Game</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Retro Racer - Pro Edition</title>
     <style>
         body {
             margin: 0;
@@ -15,12 +15,16 @@
             color: white;
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             overflow: hidden;
+            user-select: none;
+            -webkit-user-select: none;
         }
         canvas {
             border: 4px solid #fff;
             background: #252525;
             box-shadow: 0 0 35px rgba(0, 0, 0, 0.8);
             cursor: pointer;
+            max-width: 100vw;
+            max-height: 100vh;
         }
     </style>
 </head>
@@ -38,59 +42,191 @@
 
         let musicVolume = 0.6; 
         let sfxVolume = 0.5;
+        let isDraggingMusic = false;
+        let isDraggingSFX = false;
+        let controlDevice = "COMPUTER"; 
+
+        const roadWidth = 260;
+        const roadX = (canvas.width - roadWidth) / 2; 
 
         let player = {
             x: 200,
             y: 460, 
-            width: 50,
-            height: 85,
+            width: 46,
+            height: 82,
             speed: 7,
             color: "#00a8ff"
         };
 
-        const colorOptions = [
-            { name: "BLUE", hex: "#00a8ff" },
-            { name: "RED", hex: "#e84118" },
-            { name: "WHITE", hex: "#f5f6fa" },
-            { name: "BLACK", hex: "#2f3640" }, 
-            { name: "GREEN", hex: "#4cd137" },
-            { name: "YELLOW", hex: "#fbc531" },
-            { name: "PINK", hex: "#ff7bab" },    
-            { name: "CYAN", hex: "#00d2d3" },    
-            { name: "GREY", hex: "#7f8c8d" },    
-            { name: "PURPLE", hex: "#9b59b6" }   
-        ];
-        let selectedColorIndex = 0;
+        // --- ECONOMY & CAR SHOP SYSTEM ---
+        let totalMoney = localStorage.getItem("retro_totalMoney") ? parseInt(localStorage.getItem("retro_totalMoney")) : 0;
+        let topScore = localStorage.getItem("retro_topScore") ? parseInt(localStorage.getItem("retro_topScore")) : 0;
+        let equippedCarId = localStorage.getItem("retro_equippedCarId") ? localStorage.getItem("retro_equippedCarId") : "basic";
 
+        // Car configurations with unique engine characteristics (pitch multiplier & aggressiveness)
+        const carModels = [
+            { id: "basic", name: "BASIC COUPE", price: 0, owned: true, desc: "Your reliable starter ride.", baseFreq: 45, type: 'sawtooth', volMod: 0.20 },
+            { id: "normal", name: "TUNED SEDAN", price: 100, owned: false, desc: "Daily drive with custom exhaust.", baseFreq: 55, type: 'sawtooth', volMod: 0.26 },
+            { id: "sports", name: "V8 SUPERCAR", price: 300, owned: false, desc: "Aggressive aerodynamic beast.", baseFreq: 38, type: 'triangle', volMod: 0.38 },
+            { id: "f1", name: "FORMULA HYPER", price: 600, owned: false, desc: "High-revving ultimate track weapon.", baseFreq: 75, type: 'sawtooth', volMod: 0.45 }
+        ];
+        
+        let currentModelIndex = 0;
+
+        carModels.forEach((car, index) => {
+            if (car.id !== "basic") {
+                let status = localStorage.getItem("retro_car_" + car.id);
+                if (status === "owned") car.owned = true;
+            }
+            if (car.id === equippedCarId) {
+                currentModelIndex = index;
+            }
+        });
+
+        const colorOptions = [
+            { name: "NEON BLUE", hex: "#00a8ff" }, { name: "RACING RED", hex: "#e84118" },
+            { name: "PURE WHITE", hex: "#f5f6fa" }, { name: "STEALTH BLACK", hex: "#2f3640" }, 
+            { name: "LIME GREEN", hex: "#4cd137" }, { name: "CYBER YELLOW", hex: "#fbc531" },
+            { name: "HOT PINK", hex: "#ff7bab" }, { name: "ELECTRIC CYAN", hex: "#00d2d3" },    
+            { name: "ROYAL PURPLE", hex: "#9b59b6" }   
+        ];
+        
+        let savedColor = localStorage.getItem("retro_carColor") ? localStorage.getItem("retro_carColor") : "#00a8ff";
+        player.color = savedColor;
+        
+        let selectedColorIndex = colorOptions.findIndex(c => c.hex === savedColor);
+        if (selectedColorIndex === -1) selectedColorIndex = 0;
+
+        // Enemies
         let enemy = {
-            x: Math.random() * (canvas.width - 50),
-            y: -90,
-            width: 50,
-            height: 85,
-            speed: 4,
-            color: "#ff4757"
+            x: roadX + Math.random() * (roadWidth - 46),
+            y: -90, width: 46, height: 80, speed: 4, color: "#ff4757", modelId: "normal"
+        };
+
+        // Coins
+        let coin = {
+            x: roadX + Math.random() * (roadWidth - 24),
+            y: -200, width: 24, height: 24, active: true
         };
 
         let score = 0;
+        let coinsCollectedThisRound = 0;
         let roadOffset = 0;
         let roadSpeed = 6;
 
-        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        let engineOsc = null;
-        let engineGainNode = null; 
-        let musicInterval = null;
+        // --- DYNAMIC BIOME SYSTEM ---
+        let decorObjects = [];
+        
+        function getCurrentBiome() {
+            let loopScore = score % 16; 
+            if (loopScore >= 0 && loopScore <= 4) return "FOREST";
+            if (loopScore >= 5 && loopScore <= 9) return "SUBURB"; 
+            return "CITY"; 
+        }
 
-        const melody = [261.63, 329.63, 392.00, 329.63, 293.66, 349.23, 440.00, 349.23];
+        function spawnDecor(yPos) {
+            let biome = getCurrentBiome();
+            let leftX = 10 + Math.random() * 40;
+            let rightX = 350 + Math.random() * 40;
+
+            if (biome === "FOREST") {
+                decorObjects.push({ x: leftX, y: yPos, type: "TREE", size: 25 + Math.random() * 15 });
+                decorObjects.push({ x: rightX, y: yPos, type: "TREE", size: 25 + Math.random() * 15 });
+            } 
+            else if (biome === "SUBURB") {
+                if (Math.random() > 0.5) {
+                    decorObjects.push({ x: leftX, y: yPos, type: "HOUSE", w: 30, h: 30, color: "#d63031" });
+                } else {
+                    decorObjects.push({ x: leftX, y: yPos, type: "TREE", size: 20 });
+                }
+                if (Math.random() > 0.5) {
+                    decorObjects.push({ x: rightX, y: yPos, type: "HOUSE", w: 30, h: 30, color: "#e17055" });
+                } else {
+                    decorObjects.push({ x: rightX, y: yPos, type: "TREE", size: 20 });
+                }
+            } 
+            else if (biome === "CITY") {
+                decorObjects.push({ x: leftX - 10, y: yPos, type: "BUILDING", w: 35 + Math.random() * 20, h: 70 + Math.random() * 45, color: getRandomCityColor() });
+                decorObjects.push({ x: rightX - 10, y: yPos, type: "BUILDING", w: 35 + Math.random() * 20, h: 70 + Math.random() * 45, color: getRandomCityColor() });
+            }
+        }
+
+        function getRandomCityColor() {
+            const colors = ["#2c3e50", "#34495e", "#7f8c8d", "#57606f", "#4b4b4b", "#1e272e"];
+            return colors[Math.floor(Math.random() * colors.length)];
+        }
+
+        function initDecorations() {
+            decorObjects = [];
+            for (let y = -100; y < canvas.height; y += 100) spawnDecor(y);
+        }
+
+        function updateDecorations() {
+            for (let i = decorObjects.length - 1; i >= 0; i--) {
+                decorObjects[i].y += roadSpeed;
+                if (decorObjects[i].y > canvas.height) decorObjects.splice(i, 1);
+            }
+            if (decorObjects.length < 14) spawnDecor(-80);
+        }
+
+        function drawDecorations() {
+            decorObjects.forEach(obj => {
+                if (obj.type === "TREE") {
+                    ctx.fillStyle = "#5c3d2e"; ctx.fillRect(obj.x + (obj.size/2) - 3, obj.y + (obj.size/1.5), 6, obj.size/3);
+                    ctx.fillStyle = "#27ae60"; ctx.beginPath(); ctx.moveTo(obj.x + (obj.size/2), obj.y); ctx.lineTo(obj.x, obj.y + (obj.size/1.4)); ctx.lineTo(obj.x + obj.size, obj.y + (obj.size/1.4)); ctx.closePath(); ctx.fill();
+                } 
+                else if (obj.type === "HOUSE") {
+                    ctx.fillStyle = "#f5f6fa"; ctx.fillRect(obj.x, obj.y + 10, obj.w, obj.h - 10);
+                    ctx.fillStyle = obj.color; ctx.beginPath(); ctx.moveTo(obj.x + (obj.w/2), obj.y); ctx.lineTo(obj.x - 4, obj.y + 10); ctx.lineTo(obj.x + obj.w + 4, obj.y + 10); ctx.closePath(); ctx.fill();
+                    ctx.fillStyle = "#2f3640"; ctx.fillRect(obj.x + (obj.w/2) - 4, obj.y + obj.h - 10, 8, 10);
+                }
+                else if (obj.type === "BUILDING") {
+                    ctx.fillStyle = obj.color; ctx.fillRect(obj.x, obj.y, obj.w, obj.h);
+                    ctx.fillStyle = "#f1c40f";
+                    for (let wx = obj.x + 6; wx < obj.x + obj.w - 6; wx += 12) {
+                        for (let wy = obj.y + 10; wy < obj.y + obj.h - 10; wy += 18) {
+                            if (Math.random() > 0.4) ctx.fillRect(wx, wy, 5, 7);
+                        }
+                    }
+                }
+            });
+        }
+
+        // --- AUDIO SOUNDTRACK & ENGINE SOUND SYSTEM ---
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        let engineOsc = null; let engineOscSub = null; let engineGainNode = null; let musicInterval = null;
+        
+        // Extended 16-step retro synthwave progression chord line
+        const melody = [
+            261.63, 329.63, 392.00, 329.63, 293.66, 349.23, 440.00, 349.23,
+            329.63, 392.00, 493.88, 392.00, 220.00, 261.63, 329.63, 261.63
+        ];
+        const bassline = [
+            130.81, 130.81, 164.81, 164.81, 146.83, 146.83, 174.61, 174.61,
+            164.81, 164.81, 196.00, 196.00, 110.00, 110.00, 130.81, 130.81
+        ];
         let melodyIndex = 0;
 
         function startEngineSound() {
             if (sfxVolume === 0 || engineOsc) return;
+            let activeCar = carModels.find(c => c.id === equippedCarId) || carModels[0];
             try {
                 engineOsc = audioCtx.createOscillator();
                 engineGainNode = audioCtx.createGain();
-                engineOsc.type = 'sawtooth';
-                engineOsc.frequency.setValueAtTime(50, audioCtx.currentTime); 
-                engineGainNode.gain.setValueAtTime(sfxVolume * 0.25, audioCtx.currentTime); 
+                
+                engineOsc.type = activeCar.type;
+                engineOsc.frequency.setValueAtTime(activeCar.baseFreq, audioCtx.currentTime);
+                
+                // Extra sub-layer oscillator specifically tailored to mimic beefy V8/F1 configurations
+                if (activeCar.id === "sports" || activeCar.id === "f1") {
+                    engineOscSub = audioCtx.createOscillator();
+                    engineOscSub.type = "sawtooth";
+                    engineOscSub.frequency.setValueAtTime(activeCar.baseFreq * 0.5, audioCtx.currentTime);
+                    engineOscSub.connect(engineGainNode);
+                    engineOscSub.start();
+                }
+
+                engineGainNode.gain.setValueAtTime(sfxVolume * activeCar.volMod, audioCtx.currentTime);
                 engineOsc.connect(engineGainNode);
                 engineGainNode.connect(audioCtx.destination);
                 engineOsc.start();
@@ -99,454 +235,515 @@
 
         function updateEnginePitch() {
             if (engineOsc && sfxVolume > 0) {
-                let pitch = 50 + (roadSpeed * 5);
+                let activeCar = carModels.find(c => c.id === equippedCarId) || carModels[0];
+                let dynamicMultiplier = activeCar.id === "f1" ? 9 : 5;
+                let pitch = activeCar.baseFreq + (roadSpeed * dynamicMultiplier);
+                
                 engineOsc.frequency.setValueAtTime(pitch, audioCtx.currentTime);
+                if (engineOscSub) {
+                    engineOscSub.frequency.setValueAtTime(pitch * 0.5, audioCtx.currentTime);
+                }
             }
         }
 
         function updateEngineVolume() {
-            if (engineGainNode) {
-                engineGainNode.gain.setValueAtTime(sfxVolume * 0.25, audioCtx.currentTime);
-            } else if (sfxVolume > 0 && gameState === "PLAYING" && !isSettingOpen && !isTipsOpen) {
-                startEngineSound();
+            if (engineGainNode) { 
+                let activeCar = carModels.find(c => c.id === equippedCarId) || carModels[0];
+                engineGainNode.gain.setValueAtTime(sfxVolume * activeCar.volMod, audioCtx.currentTime); 
             }
+            else if (sfxVolume > 0 && gameState === "PLAYING" && !isSettingOpen && !isTipsOpen) { startEngineSound(); }
         }
 
-        function stopEngineSound() {
-            if (engineOsc) {
-                try { engineOsc.stop(); } catch(e){}
-                engineOsc = null;
-                engineGainNode = null;
-            }
+        function stopEngineSound() { 
+            if (engineOsc) { try { engineOsc.stop(); } catch(e){} engineOsc = null; } 
+            if (engineOscSub) { try { engineOscSub.stop(); } catch(e){} engineOscSub = null; }
+            engineGainNode = null; 
         }
 
         function startMusic() {
             if (musicInterval) return;
-            
             musicInterval = setInterval(() => {
                 if (gameState !== "PLAYING" || isSettingOpen || isTipsOpen || musicVolume === 0) return;
-                
                 try {
-                    let osc = audioCtx.createOscillator();
-                    let gain = audioCtx.createGain();
-                    
-                    osc.type = 'square'; 
-                    osc.frequency.setValueAtTime(melody[melodyIndex], audioCtx.currentTime);
+                    // Lead Arpeggio Synth
+                    let osc = audioCtx.createOscillator(); let gain = audioCtx.createGain();
+                    osc.type = 'square'; osc.frequency.setValueAtTime(melody[melodyIndex], audioCtx.currentTime);
+                    gain.gain.setValueAtTime(musicVolume * 0.18, audioCtx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.28);
+                    osc.connect(gain); gain.connect(audioCtx.destination);
+                    osc.start(); osc.stop(audioCtx.currentTime + 0.3);
+
+                    // Deeper Bass Layer for Vibe Enhancement
+                    let bassOsc = audioCtx.createOscillator(); let bassGain = audioCtx.createGain();
+                    bassOsc.type = 'sawtooth'; bassOsc.frequency.setValueAtTime(bassline[melodyIndex], audioCtx.currentTime);
+                    bassGain.gain.setValueAtTime(musicVolume * 0.22, audioCtx.currentTime);
+                    bassGain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.28);
+                    bassOsc.connect(bassGain); bassGain.connect(audioCtx.destination);
+                    bassOsc.start(); bassOsc.stop(audioCtx.currentTime + 0.3);
+
                     melodyIndex = (melodyIndex + 1) % melody.length;
-                    
-                    gain.gain.setValueAtTime(musicVolume * 0.4, audioCtx.currentTime);
-                    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.22);
-                    
-                    osc.connect(gain);
-                    gain.connect(audioCtx.destination);
-                    osc.start();
-                    osc.stop(audioCtx.currentTime + 0.25);
                 } catch(e){}
-            }, 220); 
+            }, 180); 
         }
 
-        function stopMusic() {
-            if (musicInterval) {
-                clearInterval(musicInterval);
-                musicInterval = null;
-            }
-        }
-
+        function stopMusic() { if (musicInterval) { clearInterval(musicInterval); musicInterval = null; } }
+        
         function playCrashSound() {
             if (sfxVolume === 0) return;
             try {
-                let osc = audioCtx.createOscillator();
-                let gain = audioCtx.createGain();
-                osc.type = 'sawtooth';
-                osc.frequency.setValueAtTime(220, audioCtx.currentTime);
+                let osc = audioCtx.createOscillator(); let gain = audioCtx.createGain();
+                osc.type = 'sawtooth'; osc.frequency.setValueAtTime(220, audioCtx.currentTime);
                 osc.frequency.exponentialRampToValueAtTime(20, audioCtx.currentTime + 0.7);
                 gain.gain.setValueAtTime(sfxVolume * 0.6, audioCtx.currentTime);
                 gain.gain.linearRampToValueAtTime(0.01, audioCtx.currentTime + 0.7);
-                osc.connect(gain);
-                gain.connect(audioCtx.destination);
-                osc.start();
-                osc.stop(audioCtx.currentTime + 0.7);
+                osc.connect(gain); gain.connect(audioCtx.destination);
+                osc.start(); osc.stop(audioCtx.currentTime + 0.7);
             } catch(e){}
         }
 
+        function playCoinSound() {
+            if (sfxVolume === 0) return;
+            try {
+                let osc = audioCtx.createOscillator(); let gain = audioCtx.createGain();
+                osc.type = 'sine'; osc.frequency.setValueAtTime(587.33, audioCtx.currentTime);
+                osc.frequency.setValueAtTime(880, audioCtx.currentTime + 0.08);
+                gain.gain.setValueAtTime(sfxVolume * 0.4, audioCtx.currentTime);
+                gain.gain.linearRampToValueAtTime(0.01, audioCtx.currentTime + 0.2);
+                osc.connect(gain); gain.connect(audioCtx.destination);
+                osc.start(); osc.stop(audioCtx.currentTime + 0.2);
+            } catch(e){}
+        }
+
+        // --- INPUT HANDLING ---
         const keys = { ArrowLeft: false, ArrowRight: false };
+        let touchLeftActive = false; let touchRightActive = false;
 
         window.addEventListener("keydown", (e) => {
-            if (gameState === "PLAYING" && !isSettingOpen && !isTipsOpen && e.key in keys) {
-                keys[e.key] = true;
-            }
-            if (gameState === "GAMEOVER" && e.key === "1") {
-                resetGame();
-                gameState = "PLAYING";
-                startEngineSound();
-                startMusic();
-            }
+            if (gameState === "PLAYING" && !isSettingOpen && !isTipsOpen && e.key in keys) keys[e.key] = true;
+            if (gameState === "GAMEOVER" && e.key === "1") triggerRestart();
         });
+        window.addEventListener("keyup", (e) => { if (e.key in keys) keys[e.key] = false; });
 
-        window.addEventListener("keyup", (e) => {
-            if (e.key in keys) keys[e.key] = false;
-        });
+        function triggerRestart() {
+            resetGame();
+            gameState = "PLAYING";
+            startEngineSound();
+            startMusic();
+        }
 
-        canvas.addEventListener("mousedown", (e) => {
+        function handlePointerDown(clientX, clientY) {
             const rect = canvas.getBoundingClientRect();
-            const mouseX = e.clientX - rect.left;
-            const mouseY = e.clientY - rect.top;
+            const mouseX = ((clientX - rect.left) / rect.width) * canvas.width;
+            const mouseY = ((clientY - rect.top) / rect.height) * canvas.height;
 
             if (audioCtx.state === 'suspended') audioCtx.resume();
 
+            // Settings Menu Toggle Click Bounds
             if (gameState !== "CUSTOM" && !isTipsOpen && mouseX >= canvas.width - 50 && mouseX <= canvas.width - 10 && mouseY >= 10 && mouseY <= 50) {
                 isSettingOpen = !isSettingOpen;
-                if (isSettingOpen) stopEngineSound();
-                else if (gameState === "PLAYING") startEngineSound();
+                if (isSettingOpen) stopEngineSound(); else if (gameState === "PLAYING") startEngineSound();
                 return;
             }
-
+            // Tips Menu Toggle Click Bounds
             if (gameState !== "CUSTOM" && !isSettingOpen && mouseX >= canvas.width - 95 && mouseX <= canvas.width - 55 && mouseY >= 10 && mouseY <= 50) {
                 isTipsOpen = !isTipsOpen;
-                if (isTipsOpen) stopEngineSound();
-                else if (gameState === "PLAYING") startEngineSound();
+                if (isTipsOpen) stopEngineSound(); else if (gameState === "PLAYING") startEngineSound();
                 return;
             }
-
-            if (isTipsOpen) {
-                if (mouseX >= 150 && mouseX <= 300 && mouseY >= 410 && mouseY <= 455) {
-                    isTipsOpen = false;
-                    if (gameState === "PLAYING") startEngineSound();
-                }
-                return;
+            if (isTipsOpen && mouseX >= 150 && mouseX <= 300 && mouseY >= 410 && mouseY <= 455) {
+                isTipsOpen = false; if (gameState === "PLAYING") startEngineSound(); return;
             }
-
+            
             if (isSettingOpen) {
-                if (mouseX >= 60 && mouseX <= 380 && mouseY >= 215 && mouseY <= 245) {
-                    let clickedPct = (mouseX - 60) / 320;
-                    musicVolume = Math.max(0, Math.min(1, clickedPct)); 
+                if (mouseX >= 60 && mouseX <= 380 && mouseY >= 150 && mouseY <= 180) { isDraggingMusic = true; handleSliderMove(mouseX, "MUSIC"); }
+                if (mouseX >= 60 && mouseX <= 380 && mouseY >= 230 && mouseY <= 260) { isDraggingSFX = true; handleSliderMove(mouseX, "SFX"); }
+                if (mouseX >= 60 && mouseX <= 210 && mouseY >= 315 && mouseY <= 400) controlDevice = "MOBILE";
+                if (mouseX >= 230 && mouseX <= 380 && mouseY >= 315 && mouseY <= 400) controlDevice = "COMPUTER";
+                
+                if (gameState === "PLAYING" && mouseX >= 60 && mouseX <= 210 && mouseY >= 440 && mouseY <= 485) {
+                    isSettingOpen = false; stopEngineSound(); stopMusic(); gameState = "LOBBY"; return;
                 }
-                if (mouseX >= 60 && mouseX <= 380 && mouseY >= 315 && mouseY <= 345) {
-                    let clickedPct = (mouseX - 60) / 320;
-                    sfxVolume = Math.max(0, Math.min(1, clickedPct));
-                    updateEngineVolume();
-                    if (sfxVolume === 0) stopEngineSound();
-                }
-                if (mouseX >= 150 && mouseX <= 300 && mouseY >= 430 && mouseY <= 475) {
-                    isSettingOpen = false;
+                let saveBtnX = (gameState === "PLAYING") ? 230 : 150;
+                if (mouseX >= saveBtnX && mouseX <= saveBtnX + 150 && mouseY >= 440 && mouseY <= 485) {
+                    isSettingOpen = false; isDraggingMusic = false; isDraggingSFX = false;
                     if (gameState === "PLAYING") startEngineSound();
                 }
                 return;
             }
-
+            
+            if (gameState === "PLAYING" && controlDevice === "MOBILE") {
+                if (mouseX >= 20 && mouseX <= 140 && mouseY >= 480 && mouseY <= 560) touchLeftActive = true;
+                if (mouseX >= 310 && mouseX <= 430 && mouseY >= 480 && mouseY <= 560) touchRightActive = true;
+            }
+            
             if (gameState === "LOBBY") {
-                if (mouseX >= 125 && mouseX <= 325 && mouseY >= 310 && mouseY <= 360) {
-                    resetGame();
-                    gameState = "PLAYING";
-                    startEngineSound();
-                    startMusic();
-                }
-                if (mouseX >= 125 && mouseX <= 325 && mouseY >= 390 && mouseY <= 440) {
+                if (mouseX >= 125 && mouseX <= 325 && mouseY >= 320 && mouseY <= 370) triggerRestart();
+                if (mouseX >= 125 && mouseX <= 325 && mouseY >= 400 && mouseY <= 450) {
+                    currentModelIndex = carModels.findIndex(c => c.id === equippedCarId);
                     gameState = "CUSTOM";
                 }
             } 
             else if (gameState === "CUSTOM") {
-                if (mouseX >= 70 && mouseX <= 130 && mouseY >= 260 && mouseY <= 310) {
+                // Showroom Selection Mechanics
+                if (mouseX >= 50 && mouseX <= 100 && mouseY >= 140 && mouseY <= 190) {
+                    currentModelIndex = (currentModelIndex - 1 + carModels.length) % carModels.length;
+                }
+                if (mouseX >= 350 && mouseX <= 400 && mouseY >= 140 && mouseY <= 190) {
+                    currentModelIndex = (currentModelIndex + 1) % carModels.length;
+                }
+
+                if (mouseX >= 50 && mouseX <= 100 && mouseY >= 370 && mouseY <= 420) {
                     selectedColorIndex = (selectedColorIndex - 1 + colorOptions.length) % colorOptions.length;
                     player.color = colorOptions[selectedColorIndex].hex;
+                    localStorage.setItem("retro_carColor", player.color);
                 }
-                if (mouseX >= 320 && mouseX <= 380 && mouseY >= 260 && mouseY <= 310) {
+                if (mouseX >= 350 && mouseX <= 400 && mouseY >= 370 && mouseY <= 420) {
                     selectedColorIndex = (selectedColorIndex + 1) % colorOptions.length;
                     player.color = colorOptions[selectedColorIndex].hex;
+                    localStorage.setItem("retro_carColor", player.color);
                 }
-                if (mouseX >= 125 && mouseX <= 325 && mouseY >= 470 && mouseY <= 520) {
-                    gameState = "LOBBY";
-                }
-            }
-            else if (gameState === "GAMEOVER") {
-                if (mouseX >= 125 && mouseX <= 325 && mouseY >= 410 && mouseY <= 455) {
-                    gameState = "LOBBY";
-                }
-            }
-        });
 
-        function resetGame() {
-            player.x = 200;
-            player.y = 460;
-            enemy.x = Math.random() * (canvas.width - 50);
-            enemy.y = -90;
-            enemy.speed = 4;
-            roadSpeed = 6;
-            score = 0;
-            isSettingOpen = false;
-            isTipsOpen = false;
+                let activeCar = carModels[currentModelIndex];
+                if (mouseX >= 125 && mouseX <= 325 && mouseY >= 275 && mouseY <= 320) {
+                    if (!activeCar.owned && totalMoney >= activeCar.price) {
+                        totalMoney -= activeCar.price;
+                        activeCar.owned = true;
+                        equippedCarId = activeCar.id; 
+                        localStorage.setItem("retro_totalMoney", totalMoney);
+                        localStorage.setItem("retro_car_" + activeCar.id, "owned");
+                        localStorage.setItem("retro_equippedCarId", equippedCarId);
+                    } else if (activeCar.owned && equippedCarId !== activeCar.id) {
+                        equippedCarId = activeCar.id;
+                        localStorage.setItem("retro_equippedCarId", equippedCarId);
+                    }
+                }
+
+                if (mouseX >= 125 && mouseX <= 325 && mouseY >= 495 && mouseY <= 540) gameState = "LOBBY";
+            } 
+            else if (gameState === "GAMEOVER") {
+                if (mouseX >= 125 && mouseX <= 325 && mouseY >= 435 && mouseY <= 480) gameState = "LOBBY";
+                if (mouseX >= 110 && mouseX <= 340 && mouseY >= 355 && mouseY <= 400) triggerRestart();
+            }
         }
 
+        function handleSliderMove(mouseX, type) {
+            let clickedPct = (mouseX - 60) / 320; clickedPct = Math.max(0, Math.min(1, clickedPct));
+            if (type === "MUSIC") musicVolume = clickedPct;
+            else if (type === "SFX") { sfxVolume = clickedPct; updateEngineVolume(); if (sfxVolume === 0) stopEngineSound(); }
+        }
+        function handlePointerMove(clientX, clientY) {
+            if (!isSettingOpen || (!isDraggingMusic && !isDraggingSFX)) return;
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = ((clientX - rect.left) / rect.width) * canvas.width;
+            if (isDraggingMusic) handleSliderMove(mouseX, "MUSIC");
+            if (isDraggingSFX) handleSliderMove(mouseX, "SFX");
+        }
+        function handlePointerUp() { isDraggingMusic = false; isDraggingSFX = false; touchLeftActive = false; touchRightActive = false; }
+
+        canvas.addEventListener("mousedown", (e) => handlePointerDown(e.clientX, e.clientY));
+        window.addEventListener("mousemove", (e) => handlePointerMove(e.clientX, e.clientY));
+        window.addEventListener("mouseup", handlePointerUp);
+        canvas.addEventListener("touchstart", (e) => { e.preventDefault(); handlePointerDown(e.touches[0].clientX, e.touches[0].clientY); }, { passive: false });
+        window.addEventListener("touchmove", (e) => { if (isSettingOpen) e.preventDefault(); handlePointerMove(e.touches[0].clientX, e.touches[0].clientY); }, { passive: false });
+        window.addEventListener("touchend", handlePointerUp);
+
+        function resetGame() {
+            player.x = 200; player.y = (controlDevice === "MOBILE") ? 380 : 460;
+            enemy.x = roadX + Math.random() * (roadWidth - 46); enemy.y = -90;
+            enemy.modelId = carModels[Math.floor(Math.random() * carModels.length)].id;
+            coin.y = -200; coin.x = roadX + Math.random() * (roadWidth - 24); coin.active = true;
+            enemy.speed = 4; roadSpeed = 6; score = 0; coinsCollectedThisRound = 0;
+            isSettingOpen = false; isTipsOpen = false;
+            initDecorations();
+        }
+
+        // --- GAME MECHANIC RUNTIME ---
         function update() {
             if (gameState !== "PLAYING" || isSettingOpen || isTipsOpen) return;
 
             roadOffset = (roadOffset + roadSpeed) % 70;
-
             updateEnginePitch();
+            updateDecorations();
 
-            if (keys.ArrowLeft && player.x > 10) player.x -= player.speed;
-            if (keys.ArrowRight && player.x < canvas.width - player.width - 10) player.x += player.speed;
+            if ((keys.ArrowLeft || touchLeftActive) && player.x > roadX + 8) player.x -= player.speed;
+            if ((keys.ArrowRight || touchRightActive) && player.x < roadX + roadWidth - player.width - 8) player.x += player.speed;
 
             enemy.y += enemy.speed;
-
             if (enemy.y > canvas.height) {
-                enemy.y = -90;
-                enemy.x = Math.random() * (canvas.width - enemy.width);
-                score++;
-                enemy.speed += 0.4;
-                roadSpeed += 0.4; 
+                enemy.y = -90; enemy.x = roadX + Math.random() * (roadWidth - enemy.width);
+                enemy.modelId = carModels[Math.floor(Math.random() * carModels.length)].id;
+                score++; enemy.speed += 0.35; roadSpeed += 0.35; 
+                if (score > topScore) { topScore = score; localStorage.setItem("retro_topScore", topScore); }
             }
 
-            if (
-                player.x < enemy.x + enemy.width &&
-                player.x + player.width > enemy.x &&
-                player.y < enemy.y + enemy.height &&
-                player.y + player.height > enemy.y
-            ) {
-                gameState = "GAMEOVER";
-                stopEngineSound();
-                stopMusic();
-                playCrashSound();
+            coin.y += roadSpeed;
+            if (coin.y > canvas.height) {
+                coin.y = -150 - Math.random() * 250;
+                coin.x = roadX + Math.random() * (roadWidth - coin.width);
+                coin.active = true;
+            }
+
+            if (coin.active && player.x < coin.x + coin.width && player.x + player.width > coin.x && player.y < coin.y + coin.height && player.y + player.height > coin.y) {
+                coin.active = false; coinsCollectedThisRound++; totalMoney += 10; 
+                localStorage.setItem("retro_totalMoney", totalMoney); playCoinSound();
+            }
+
+            if (player.x < enemy.x + enemy.width && player.x + player.width > enemy.x && player.y < enemy.y + enemy.height && player.y + player.height > enemy.y) {
+                gameState = "GAMEOVER"; stopEngineSound(); stopMusic(); playCrashSound();
             }
         }
 
-        function drawCar(car, isPlayer) {
+        // --- DETAILED CAR VECTOR GRAPHICS SYSTEM ---
+        function drawCustomCar(x, y, width, height, color, modelId, isPlayer) {
             ctx.fillStyle = "#111"; 
-            ctx.fillRect(car.x - 4, car.y + 10, 4, 18);  
-            ctx.fillRect(car.x + car.width, car.y + 10, 4, 18); 
-            ctx.fillRect(car.x - 4, car.y + car.height - 25, 4, 18); 
-            ctx.fillRect(car.x + car.width, car.y + car.height - 25, 4, 18); 
-
-            ctx.fillStyle = car.color;
-            ctx.fillRect(car.x, car.y, car.width, car.height);
-
-            ctx.fillStyle = (car.color === "#f5f6fa") ? "#7f8c8d" : "#dcdde1"; 
             
-            if (isPlayer) {
-                ctx.fillRect(car.x + 5, car.y + 25, car.width - 10, 12); 
-                ctx.fillRect(car.x + 8, car.y + car.height - 15, car.width - 16, 6); 
-                ctx.fillStyle = "#fbc531";
-                ctx.fillRect(car.x + 6, car.y, 10, 5);
-                ctx.fillRect(car.x + car.width - 16, car.y, 10, 5);
-            } else {
-                ctx.fillRect(car.x + 5, car.y + car.height - 37, car.width - 10, 12); 
-                ctx.fillRect(car.x + 8, car.y + 9, car.width - 16, 6); 
-                ctx.fillStyle = "#fbc531";
-                ctx.fillRect(car.x + 6, car.y + car.height - 5, 10, 5);
-                ctx.fillRect(car.x + car.width - 16, car.y + car.height - 5, 10, 5);
+            if (modelId === "basic") {
+                // Wheels
+                ctx.fillRect(x - 5, y + 10, 5, 18); ctx.fillRect(x + width, y + 10, 5, 18); 
+                ctx.fillRect(x - 5, y + height - 25, 5, 18); ctx.fillRect(x + width, y + height - 25, 5, 18); 
+                // Body & Exhaust
+                ctx.fillStyle = "#555"; ctx.fillRect(x + 6, y + height, 6, 4);
+                ctx.fillStyle = color; ctx.fillRect(x, y, width, height);
+                // Windows & Details
+                ctx.fillStyle = "#1e272e"; ctx.fillRect(x + 4, y + 12, width - 8, 6);
+                ctx.fillStyle = "#dcdde1"; ctx.fillRect(x + 5, y + (isPlayer?26:45), width - 10, 14); 
+            } 
+            else if (modelId === "normal") {
+                // Wheels
+                ctx.fillRect(x - 5, y + 8, 5, 16); ctx.fillRect(x + width, y + 8, 5, 16);
+                ctx.fillRect(x - 5, y + height - 24, 5, 16); ctx.fillRect(x + width, y + height - 24, 5, 16);
+                // Body & Dual Exhausts
+                ctx.fillStyle = "#777"; ctx.fillRect(x + 4, y + height, 5, 5); ctx.fillRect(x + width - 9, y + height, 5, 5);
+                ctx.fillStyle = color; ctx.fillRect(x, y, width, height);
+                // Racing Stripe
+                ctx.fillStyle = "#fff"; ctx.fillRect(x + (width/2) - 3, y, 6, height);
+                // Windshield
+                ctx.fillStyle = "#2f3640"; ctx.fillRect(x, y + (isPlayer?36:41), width, 4);
+                ctx.fillStyle = "#718093"; ctx.fillRect(x + 5, y + (isPlayer?18:52), width - 10, 14);
+            } 
+            else if (modelId === "sports") {
+                // Wide Wheels
+                ctx.fillRect(x - 7, y + 12, 7, 18); ctx.fillRect(x + width, y + 12, 7, 18);
+                ctx.fillRect(x - 7, y + height - 26, 7, 20); ctx.fillRect(x + width, y + height - 26, 7, 20);
+                // Aggressive Body Shape
+                ctx.fillStyle = color; ctx.beginPath();
+                if(isPlayer) {
+                    ctx.moveTo(x + 8, y); ctx.lineTo(x + width - 8, y); ctx.lineTo(x + width, y + height - 8); ctx.lineTo(x, y + height - 8);
+                } else {
+                    ctx.moveTo(x, y + 8); ctx.lineTo(x + width, y + 8); ctx.lineTo(x + width - 8, y + height); ctx.lineTo(x + 8, y + height);
+                }
+                ctx.closePath(); ctx.fill();
+                // Spoiler & Under-glow Lines
+                ctx.fillStyle = "#111"; let spoilerY = isPlayer ? (y + height - 8) : y; ctx.fillRect(x - 6, spoilerY, width + 12, 8);
+                ctx.fillStyle = "#fff"; ctx.fillRect( spoilerY === y ? x + 4 : x + 2, y + height, width - 4, 3);
+                // Cabin Area
+                ctx.fillStyle = "#2c3e50"; ctx.fillRect(x + 6, y + (isPlayer?22:46), width - 12, 14);
+                ctx.fillStyle = "#dcdde1"; ctx.fillRect(x + 10, y + (isPlayer?24:48), width - 20, 10);
+            } 
+            else if (modelId === "f1") {
+                // Hyper Exposed F1 Open Wheels
+                ctx.fillRect(x - 12, y + 14, 10, 18); ctx.fillRect(x + width + 2, y + 14, 10, 18);
+                ctx.fillRect(x - 15, y + height - 26, 13, 24); ctx.fillRect(x + width + 2, y + height - 26, 13, 24);
+                // Central Needle Nose Aero Body
+                ctx.fillStyle = color; ctx.fillRect(x + 11, y, width - 22, height); 
+                // Sidepods & Front/Rear Wings
+                if(isPlayer) {
+                    ctx.beginPath(); ctx.moveTo(x + 11, y + 25); ctx.lineTo(x - 2, y + height - 12); ctx.lineTo(x + width + 2, y + height - 12); ctx.lineTo(x + width - 11, y + 25); ctx.closePath(); ctx.fill();
+                    ctx.fillStyle = "#222"; ctx.fillRect(x - 4, y, width + 8, 6); ctx.fillRect(x - 10, y + height - 6, width + 20, 6);
+                } else {
+                    ctx.beginPath(); ctx.moveTo(x + 11, y + height - 25); ctx.lineTo(x - 2, y + 12); ctx.lineTo(x + width + 2, y + 12); ctx.lineTo(x + width - 11, y + height - 25); ctx.closePath(); ctx.fill();
+                    ctx.fillStyle = "#222"; ctx.fillRect(x - 4, y + height - 6, width + 8, 6); ctx.fillRect(x - 10, y, width + 20, 6);
+                }
+                // Driver Helmet
+                ctx.fillStyle = "#fbc531"; ctx.beginPath(); ctx.arc(x + (width/2), y + (height/2), 6, 0, Math.PI*2); ctx.fill();
+                ctx.fillStyle = "#111"; ctx.fillRect(x + (width/2) - 4, y + (height/2) - 5, 8, 3);
             }
-            ctx.fillStyle = "rgba(0,0,0,0.15)";
-            ctx.fillRect(car.x + 5, car.y + 45, car.width - 10, 15);
+
+            // High Beam Glowing Headlights
+            ctx.fillStyle = "#fbc531";
+            if (isPlayer) {
+                ctx.fillRect(x + 4, y, 8, 4); ctx.fillRect(x + width - 12, y, 8, 4);
+            } else {
+                ctx.fillRect(x + 4, y + height - 4, 8, 4); ctx.fillRect(x + width - 12, y + height - 4, 8, 4);
+            }
         }
 
         function drawActionButtons() {
             if (gameState === "CUSTOM") return;
-            
-            ctx.fillStyle = "#444";
-            ctx.fillRect(canvas.width - 50, 10, 40, 40);
-            ctx.fillStyle = "#fff";
-            ctx.font = "22px Arial";
-            ctx.fillText("⚙️", canvas.width - 43, 38);
-
-            ctx.fillStyle = "#444";
-            ctx.fillRect(canvas.width - 95, 10, 40, 40);
-            ctx.fillStyle = "#fff";
-            ctx.font = "bold 20px Arial";
-            ctx.fillText("❓", canvas.width - 86, 37);
+            ctx.fillStyle = "#444"; ctx.fillRect(canvas.width - 50, 10, 40, 40);
+            ctx.fillStyle = "#fff"; ctx.font = "22px Arial"; ctx.fillText("⚙️", canvas.width - 43, 38);
+            ctx.fillStyle = "#444"; ctx.fillRect(canvas.width - 95, 10, 40, 40);
+            ctx.fillStyle = "#fff"; ctx.font = "bold 20px Arial"; ctx.fillText("❓", canvas.width - 86, 37);
         }
 
         function drawSettingMenu() {
-            ctx.fillStyle = "rgba(0, 0, 0, 0.93)";
-            ctx.fillRect(30, 80, canvas.width - 60, 430);
-            ctx.strokeStyle = "#fff";
-            ctx.lineWidth = 2;
-            ctx.strokeRect(30, 80, canvas.width - 60, 430);
-
-            ctx.fillStyle = "#fbc531";
-            ctx.font = "bold 26px Arial";
-            ctx.fillText("SETTINGS", canvas.width / 2 - 65, 130);
-
-            ctx.fillStyle = "#fff";
-            ctx.font = "18px Arial";
-            ctx.fillText(`Soundtrack Music: ${Math.round(musicVolume * 100)}%`, 60, 195);
+            ctx.fillStyle = "rgba(0, 0, 0, 0.95)"; ctx.fillRect(25, 40, canvas.width - 50, 495);
+            ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.strokeRect(25, 40, canvas.width - 50, 495);
+            ctx.fillStyle = "#fbc531"; ctx.font = "bold 24px Arial"; ctx.fillText("SETTINGS MENU", canvas.width / 2 - 95, 80);
+            ctx.fillStyle = "#fff"; ctx.font = "15px Arial"; ctx.fillText(`Soundtrack Music: ${Math.round(musicVolume * 100)}%`, 60, 135);
+            ctx.fillStyle = "#444"; ctx.fillRect(60, 150, 320, 10); ctx.fillStyle = "#00a8ff"; ctx.fillRect(60, 150, 320 * musicVolume, 10);
+            ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(60 + (320 * musicVolume), 155, 10, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = "#fff"; ctx.fillText(`Engine Sound SFX: ${Math.round(sfxVolume * 100)}%`, 60, 215);
+            ctx.fillStyle = "#444"; ctx.fillRect(60, 230, 320, 10); ctx.fillStyle = "#2ecc71"; ctx.fillRect(60, 230, 320 * sfxVolume, 10);
+            ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(60 + (320 * sfxVolume), 235, 10, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = "#fff"; ctx.font = "bold 16px Arial"; ctx.fillText("CHOOSE SYSTEM CONTROL:", 60, 295);
+            ctx.fillStyle = (controlDevice === "MOBILE") ? "#2c3e50" : "#252525"; ctx.strokeStyle = (controlDevice === "MOBILE") ? "#2ecc71" : "#555"; ctx.lineWidth = (controlDevice === "MOBILE") ? 3 : 1; ctx.fillRect(60, 315, 150, 85); ctx.strokeRect(60, 315, 150, 85);
+            ctx.fillStyle = "#fff"; ctx.font = "28px Arial"; ctx.fillText("📱", 120, 355); ctx.font = "bold 13px Arial"; ctx.fillStyle = (controlDevice === "MOBILE") ? "#2ecc71" : "#aaa"; ctx.fillText("PHONE MODE", 93, 385);
+            ctx.fillStyle = (controlDevice === "COMPUTER") ? "#2c3e50" : "#252525"; ctx.strokeStyle = (controlDevice === "COMPUTER") ? "#00a8ff" : "#555"; ctx.lineWidth = (controlDevice === "COMPUTER") ? 3 : 1; ctx.fillRect(230, 315, 150, 85); ctx.strokeRect(230, 315, 150, 85);
+            ctx.fillStyle = "#fff"; ctx.font = "28px Arial"; ctx.fillText("💻", 290, 355); ctx.font = "bold 13px Arial"; ctx.fillStyle = (controlDevice === "COMPUTER") ? "#00a8ff" : "#aaa"; ctx.fillText("LAPTOP MODE", 262, 385);
             
-            ctx.fillStyle = "#555"; 
-            ctx.fillRect(60, 220, 320, 14);
-            ctx.fillStyle = "#00a8ff"; 
-            ctx.fillRect(60, 220, 320 * musicVolume, 14);
-            ctx.fillStyle = "#fff"; 
-            ctx.fillRect(60 + (320 * musicVolume) - 6, 214, 12, 26);
-
-            ctx.fillStyle = "#fff";
-            ctx.font = "18px Arial";
-            ctx.fillText(`Engine Sound SFX: ${Math.round(sfxVolume * 100)}%`, 60, 295);
-            
-            ctx.fillStyle = "#555";
-            ctx.fillRect(60, 320, 320, 14);
-            ctx.fillStyle = "#2ecc71"; 
-            ctx.fillRect(60, 320, 320 * sfxVolume, 14);
-            ctx.fillStyle = "#fff";
-            ctx.fillRect(60 + (320 * sfxVolume) - 6, 314, 12, 26);
-
-            ctx.fillStyle = "#7f8c8d";
-            ctx.fillRect(150, 430, 150, 45);
-            ctx.fillStyle = "#fff";
-            ctx.font = "bold 16px Arial";
-            ctx.fillText("CLOSE", 198, 458);
+            if (gameState === "PLAYING") {
+                ctx.fillStyle = "#e67e22"; ctx.fillRect(60, 440, 150, 45);
+                ctx.fillStyle = "#fff"; ctx.font = "bold 14px Arial"; ctx.fillText("BACK TO LOBBY", 82, 467);
+                ctx.fillStyle = "#e74c3c"; ctx.fillRect(230, 440, 150, 45);
+                ctx.fillStyle = "#fff"; ctx.font = "bold 14px Arial"; ctx.fillText("SAVE & RESUME", 252, 467);
+            } else {
+                ctx.fillStyle = "#e74c3c"; ctx.fillRect(150, 440, 150, 45);
+                ctx.fillStyle = "#fff"; ctx.font = "bold 14px Arial"; ctx.fillText("SAVE & CLOSE", 177, 467);
+            }
         }
 
         function drawTipsMenu() {
-            ctx.fillStyle = "rgba(0, 0, 0, 0.95)";
-            ctx.fillRect(40, 110, canvas.width - 80, 370);
-            ctx.strokeStyle = "#fbc531";
-            ctx.lineWidth = 3;
-            ctx.strokeRect(40, 110, canvas.width - 80, 370);
+            ctx.fillStyle = "rgba(0, 0, 0, 0.95)"; ctx.fillRect(40, 110, canvas.width - 80, 370);
+            ctx.strokeStyle = "#fbc531"; ctx.lineWidth = 3; ctx.strokeRect(40, 110, canvas.width - 80, 370);
+            ctx.fillStyle = "#fbc531"; ctx.font = "bold 26px Arial"; ctx.fillText("DRIVING TIPS", canvas.width / 2 - 85, 160);
+            ctx.fillStyle = "#fff"; ctx.font = "16px Arial"; ctx.fillText("How to control your car:", 65, 220);
+            ctx.font = "14px Arial"; ctx.fillText("• Laptop: Press Left/Right Arrow Key (◀ / ▶)", 65, 265);
+            ctx.fillText("• Phone: Toggle 'Phone Mode' in settings,", 65, 300);
+            ctx.fillText("  then tap the red/blue screen D-pads.", 77, 322);
+            ctx.fillStyle = "#aaa"; ctx.fillText("Collect Gold Coins (🪙) to earn cash!", 65, 355);
+            ctx.fillText("Avoid crashing into incoming enemy cars!", 65, 377);
+            ctx.fillStyle = "#fbc531"; ctx.fillRect(150, 410, 150, 45); ctx.fillStyle = "#111"; ctx.font = "bold 16px Arial"; ctx.fillText("CLOSE", 198, 438);
+        }
 
-            ctx.fillStyle = "#fbc531";
-            ctx.font = "bold 26px Arial";
-            ctx.fillText("DRIVING TIPS", canvas.width / 2 - 85, 160);
-
-            ctx.fillStyle = "#fff";
-            ctx.font = "16px Arial";
-            ctx.fillText("How to control your car:", 65, 220);
-
-            ctx.font = "15px Arial";
-            ctx.fillText("• Press Left Arrow (◀) to steer left.", 65, 265);
-            ctx.fillText("• Press Right Arrow (▶) to steer right.", 65, 300);
-            ctx.fillStyle = "#aaa";
-            ctx.fillText("Avoid crashing into incoming enemy", 65, 350);
-            ctx.fillText("cars to keep your score streak alive!", 65, 372);
-
-            ctx.fillStyle = "#fbc531";
-            ctx.fillRect(150, 410, 150, 45);
-            ctx.fillStyle = "#111";
-            ctx.font = "bold 16px Arial";
-            ctx.fillText("CLOSE", 198, 438);
+        function drawMobileControls() {
+            if (controlDevice !== "MOBILE" || gameState !== "PLAYING") return;
+            ctx.fillStyle = "rgba(0, 0, 0, 0.4)"; ctx.fillRect(0, 470, canvas.width, 110);
+            ctx.fillStyle = touchLeftActive ? "#ff4757" : "#ff6b81"; ctx.fillRect(20, 485, 120, 75);
+            ctx.fillStyle = "#fff"; ctx.font = "bold 30px Arial"; ctx.fillText("◀", 65, 532);
+            ctx.fillStyle = touchRightActive ? "#0097e6" : "#00a8ff"; ctx.fillRect(310, 485, 120, 75);
+            ctx.fillStyle = "#fff"; ctx.font = "bold 30px Arial"; ctx.fillText("▶", 355, 532);
         }
 
         function draw() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-            ctx.strokeStyle = "#fff";
-            ctx.setLineDash([40, 30]); 
-            ctx.lineWidth = 6;
-            ctx.beginPath();
-            ctx.lineDashOffset = -roadOffset; 
-            ctx.moveTo(canvas.width / 2, 0); 
-            ctx.lineTo(canvas.width / 2, canvas.height);
-            ctx.stroke();
+            // Terrain Background
+            ctx.fillStyle = "#1e824c";
+            ctx.fillRect(0, 0, roadX, canvas.height); ctx.fillRect(roadX + roadWidth, 0, roadX, canvas.height); 
+
+            // Road Track Paint
+            ctx.fillStyle = "#252525"; ctx.fillRect(roadX, 0, roadWidth, canvas.height);
+            ctx.fillStyle = "#7f8c8d"; ctx.fillRect(roadX, 0, 6, canvas.height); ctx.fillRect(roadX + roadWidth - 6, 0, 6, canvas.height);
+            ctx.strokeStyle = "#fff"; ctx.setLineDash([40, 30]); ctx.lineWidth = 4; ctx.beginPath();
+            ctx.lineDashOffset = -roadOffset; ctx.moveTo(canvas.width / 2, 0); ctx.lineTo(canvas.width / 2, canvas.height); ctx.stroke();
+
+            drawDecorations();
 
             if (gameState === "LOBBY") {
-                ctx.fillStyle = "rgba(0, 0, 0, 0.65)";
-                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = "rgba(0, 0, 0, 0.75)"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = "#fbc531"; ctx.font = "bold 44px Arial"; ctx.fillText("RETRO RACER", canvas.width / 2 - 152, 160); 
+                
+                ctx.fillStyle = "#fff"; ctx.font = "bold 15px Arial"; 
+                let bScoreText = "🏆 BEST SCORE: " + topScore; ctx.fillText(bScoreText, canvas.width / 2 - (ctx.measureText(bScoreText).width / 2), 205);
+                
+                ctx.fillStyle = "#f1c40f"; ctx.font = "bold 17px Arial";
+                let walletText = "🪙 WALLET CASH: $" + totalMoney; ctx.fillText(walletText, canvas.width / 2 - (ctx.measureText(walletText).width / 2), 235);
 
-                ctx.fillStyle = "#fbc531";
-                ctx.font = "bold 44px Arial";
-                ctx.fillText("RETRO RACER", canvas.width / 2 - 152, 220); 
-
-                ctx.fillStyle = "#2ecc71";
-                ctx.fillRect(125, 310, 200, 50); 
-                ctx.fillStyle = "#fff";
-                ctx.font = "bold 22px Arial";
-                ctx.fillText("PLAY", 195, 342);
-
-                ctx.fillStyle = "#00a8ff";
-                ctx.fillRect(125, 390, 200, 50);
-                ctx.fillStyle = "#fff";
-                ctx.font = "bold 20px Arial";
-                ctx.fillText("CUSTOMISE", 165, 422);
+                ctx.fillStyle = "#2ecc71"; ctx.fillRect(125, 320, 200, 50); ctx.fillStyle = "#fff"; ctx.font = "bold 22px Arial"; ctx.fillText("PLAY", 195, 352);
+                ctx.fillStyle = "#00a8ff"; ctx.fillRect(125, 400, 200, 50); ctx.fillStyle = "#fff"; ctx.font = "bold 18px Arial"; ctx.fillText("SHOP & CUSTOM", 152, 432);
             } 
-            
             else if (gameState === "CUSTOM") {
-                ctx.fillStyle = "rgba(0, 0, 0, 0.8)";
-                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = "rgba(0, 0, 0, 0.9)"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+                
+                ctx.fillStyle = "#fff"; ctx.font = "bold 28px Arial"; ctx.fillText("SHOP & CUSTOM", canvas.width / 2 - 110, 50);
+                ctx.fillStyle = "#f1c40f"; ctx.font = "bold 18px Arial"; ctx.fillText("YOUR CASH: $" + totalMoney, canvas.width / 2 - 68, 85);
+                ctx.strokeStyle = "#555"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(30, 105); ctx.lineTo(420, 105); ctx.stroke();
 
-                ctx.fillStyle = "#fff";
-                ctx.font = "bold 32px Arial";
-                ctx.fillText("CUSTOMISE CAR", canvas.width / 2 - 135, 150);
+                let activeCar = carModels[currentModelIndex];
+                ctx.fillStyle = "#aaa"; ctx.font = "14px Arial"; ctx.fillText("CHOOSE CAR MODEL:", 50, 128);
+                
+                drawCustomCar(200, 150, 46, 82, player.color, activeCar.id, true);
+                
+                ctx.fillStyle = "#444"; ctx.fillRect(50, 160, 50, 45); ctx.fillStyle = "#fff"; ctx.font = "bold 20px Arial"; ctx.fillText("◀", 66, 189);
+                ctx.fillStyle = "#444"; ctx.fillRect(350, 160, 50, 45); ctx.fillStyle = "#fff"; ctx.font = "bold 20px Arial"; ctx.fillText("▶", 366, 189);
+                
+                ctx.fillStyle = "#fff"; ctx.font = "bold 20px Arial"; ctx.fillText(activeCar.name, canvas.width / 2 - (ctx.measureText(activeCar.name).width / 2), 245);
+                
+                if (!activeCar.owned) {
+                    ctx.fillStyle = "#ff4757"; ctx.font = "bold 13px Arial";
+                    let alertTxt = "⚠️ YOU MUST BUY THIS CAR FIRST!";
+                    ctx.fillText(alertTxt, canvas.width / 2 - (ctx.measureText(alertTxt).width / 2), 268);
+                    
+                    let canBuy = totalMoney >= activeCar.price;
+                    ctx.fillStyle = canBuy ? "#f39c12" : "#7f8c8d"; ctx.fillRect(125, 285, 200, 42);
+                    ctx.fillStyle = "#fff"; ctx.font = "bold 15px Arial"; 
+                    let priceTag = `BUY: $${activeCar.price}`; ctx.fillText(priceTag, canvas.width / 2 - (ctx.measureText(priceTag).width / 2), 311);
+                } else {
+                    ctx.fillStyle = "#888"; ctx.font = "italic 13px Arial"; ctx.fillText(activeCar.desc, canvas.width / 2 - (ctx.measureText(activeCar.desc).width / 2), 268);
+                    
+                    if (equippedCarId === activeCar.id) {
+                        ctx.fillStyle = "#2ecc71"; ctx.fillRect(125, 285, 200, 42);
+                        ctx.fillStyle = "#fff"; ctx.font = "bold 15px Arial"; ctx.fillText("EQUIPPED", 188, 311);
+                    } else {
+                        ctx.fillStyle = "#3498db"; ctx.fillRect(125, 285, 200, 42);
+                        ctx.fillStyle = "#fff"; ctx.font = "bold 15px Arial"; ctx.fillText("SELECT / EQUIP", 168, 311);
+                    }
+                }
 
-                let previewCar = { x: 200, y: 230, width: 50, height: 85, color: player.color };
-                drawCar(previewCar, true);
+                ctx.strokeStyle = "#555"; ctx.beginPath(); ctx.moveTo(30, 350); ctx.lineTo(420, 350); ctx.stroke();
 
-                ctx.fillStyle = "#555";
-                ctx.fillRect(70, 260, 60, 50);
-                ctx.fillStyle = "#fff";
-                ctx.font = "bold 25px Arial";
-                ctx.fillText("◀", 88, 295);
+                ctx.fillStyle = "#aaa"; ctx.font = "14px Arial"; ctx.fillText("CHANGE PAINT COLOR:", 50, 370);
+                ctx.fillStyle = "#444"; ctx.fillRect(50, 385, 50, 45); ctx.fillStyle = "#fff"; ctx.font = "bold 20px Arial"; ctx.fillText("◀", 66, 414);
+                ctx.fillStyle = "#444"; ctx.fillRect(350, 385, 50, 45); ctx.fillStyle = "#fff"; ctx.font = "bold 20px Arial"; ctx.fillText("▶", 366, 414);
+                
+                ctx.fillStyle = colorOptions[selectedColorIndex].hex; ctx.font = "bold 22px Arial"; 
+                let cName = colorOptions[selectedColorIndex].name; ctx.fillText(cName, canvas.width / 2 - (ctx.measureText(cName).width / 2), 415);
 
-                ctx.fillStyle = "#555";
-                ctx.fillRect(320, 260, 60, 50);
-                ctx.fillStyle = "#fff";
-                ctx.font = "bold 25px Arial";
-                ctx.fillText("▶", 338, 295);
-
-                ctx.fillStyle = colorOptions[selectedColorIndex].hex;
-                ctx.font = "bold 24px Arial";
-                let colorName = colorOptions[selectedColorIndex].name;
-                let textWidth = ctx.measureText(colorName).width;
-                ctx.fillText(colorName, canvas.width / 2 - (textWidth / 2), 370);
-
-                ctx.font = "14px Arial";
-                ctx.fillStyle = "#aaa";
-                ctx.fillText("Click grey buttons to change color", canvas.width / 2 - 110, 410);
-
-                ctx.fillStyle = "#e84118";
-                ctx.fillRect(125, 470, 200, 50);
-                ctx.fillStyle = "#fff";
-                ctx.font = "bold 18px Arial";
-                ctx.fillText("BACK TO MENU", 157, 501);
+                ctx.fillStyle = "#e84118"; ctx.fillRect(125, 495, 200, 45); ctx.fillStyle = "#fff"; ctx.font = "bold 16px Arial"; ctx.fillText("BACK TO LOBBY", 162, 523);
             } 
-            
             else if (gameState === "PLAYING") {
-                drawCar(player, true);
-                drawCar(enemy, false);
+                if (coin.active) {
+                    ctx.fillStyle = "#f1c40f"; ctx.beginPath(); ctx.arc(coin.x + 12, coin.y + 12, 12, 0, Math.PI * 2); ctx.fill();
+                    ctx.fillStyle = "#f39c12"; ctx.beginPath(); ctx.arc(coin.x + 12, coin.y + 12, 8, 0, Math.PI * 2); ctx.fill();
+                    ctx.fillStyle = "#fff"; ctx.font = "bold 12px Arial"; ctx.fillText("$", coin.x + 8, coin.y + 16);
+                }
 
-                ctx.fillStyle = "#fff";
-                ctx.font = "bold 22px Arial";
-                ctx.fillText("Score: " + score, 20, 40); 
+                drawCustomCar(player.x, player.y, player.width, player.height, player.color, equippedCarId, true);
+                drawCustomCar(enemy.x, enemy.y, enemy.width, enemy.height, enemy.color, enemy.modelId, false);
+                
+                ctx.fillStyle = "#fff"; ctx.font = "bold 20px Arial"; ctx.fillText("Score: " + score, 20, 35); 
+                ctx.fillStyle = "#f1c40f"; ctx.fillText("Cash: $" + totalMoney, 20, 65); 
             } 
-            
             else if (gameState === "GAMEOVER") {
-                drawCar(player, true);
-                drawCar(enemy, false);
-
-                ctx.fillStyle = "rgba(0, 0, 0, 0.85)";
-                ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-                ctx.fillStyle = "#e84118";
-                ctx.font = "bold 40px Arial";
-                ctx.fillText("GAME OVER", canvas.width / 2 - 120, canvas.height / 2 - 50);
+                drawCustomCar(player.x, player.y, player.width, player.height, player.color, equippedCarId, true);
+                drawCustomCar(enemy.x, enemy.y, enemy.width, enemy.height, enemy.color, enemy.modelId, false);
                 
-                ctx.fillStyle = "#fff";
-                ctx.font = "20px Arial";
-                ctx.fillText("Total Score: " + score, canvas.width / 2 - 65, canvas.height / 2 - 5);
+                ctx.fillStyle = "rgba(0, 0, 0, 0.88)"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = "#e84118"; ctx.font = "bold 40px Arial"; ctx.fillText("GAME OVER", canvas.width / 2 - 120, 130);
                 
-                ctx.fillStyle = "#fbc531";
-                ctx.font = "bold 20px Arial";
-                ctx.fillText("Press [ 1 ] To Play Again", canvas.width / 2 - 110, canvas.height / 2 + 50);
-
-                ctx.fillStyle = "#e67e22"; 
-                ctx.fillRect(125, 410, 200, 45);
-                ctx.fillStyle = "#fff";
-                ctx.font = "bold 16px Arial";
-                ctx.fillText("BACK TO LOBBY", 162, 438);
+                ctx.fillStyle = "#fff"; ctx.font = "18px Arial"; 
+                ctx.fillText("Score Achieved: " + score, 110, 190);
+                ctx.fillStyle = "#f1c40f"; ctx.fillText(`Coins Collected: +${coinsCollectedThisRound} (+$${coinsCollectedThisRound * 10})`, 110, 225);
+                
+                ctx.strokeStyle = "#444"; ctx.beginPath(); ctx.moveTo(60, 255); ctx.lineTo(390, 255); ctx.stroke();
+                
+                ctx.fillStyle = "#fff"; ctx.font = "16px Arial"; ctx.fillText("🏆 Best Record Score: " + topScore, 110, 290);
+                ctx.fillStyle = "#2ecc71"; ctx.fillText("🪙 Total Wallet Cash: $" + totalMoney, 110, 320);
+                
+                ctx.fillStyle = "#fbc531"; ctx.fillRect(110, 355, 230, 45); ctx.fillStyle = "#111"; ctx.font = "bold 15px Arial"; ctx.fillText("TAP / PRESS [1] RESTART", 125, 383);
+                ctx.fillStyle = "#e67e22"; ctx.fillRect(125, 435, 200, 45); ctx.fillStyle = "#fff"; ctx.font = "bold 15px Arial"; ctx.fillText("BACK TO LOBBY", 162, 463);
             }
 
+            drawMobileControls();
             drawActionButtons();
 
-            if (isSettingOpen) {
-                drawSettingMenu();
-            } else if (isTipsOpen) {
-                drawTipsMenu();
-            }
+            if (isSettingOpen) drawSettingMenu();
+            else if (isTipsOpen) drawTipsMenu();
         }
 
-        function gameLoop() {
-            update();
-            draw();
-            requestAnimationFrame(gameLoop);
-        }
-
+        function gameLoop() { update(); draw(); requestAnimationFrame(gameLoop); }
+        initDecorations();
         gameLoop();
     </script>
 </body>
